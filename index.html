@@ -7,10 +7,7 @@
   <style>
     :root {
       --bg1: #07131d;
-      --bg2: #0d1f2a;
-      --panel: rgba(7, 19, 29, 0.64);
       --text: #dfeef8;
-      --muted: #9eb6c8;
     }
 
     * { box-sizing: border-box; }
@@ -32,40 +29,48 @@
       cursor: grab;
     }
 
-    canvas.dragging {
-      cursor: grabbing;
-    }
+    canvas.dragging { cursor: grabbing; }
 
     .hud {
       position: fixed;
       top: 14px;
       left: 14px;
+      max-width: min(440px, calc(100vw - 28px));
       padding: 10px 12px;
       border: 1px solid rgba(255,255,255,0.12);
-      background: rgba(9,20,29,0.5);
+      background: rgba(9,20,29,0.72);
       border-radius: 10px;
       box-shadow: 0 8px 18px rgba(0,0,0,0.18);
       backdrop-filter: blur(6px);
       color: var(--text);
       font-size: 12px;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
+      letter-spacing: 0.03em;
       user-select: none;
       pointer-events: none;
+      line-height: 1.6;
     }
 
-    .hud strong {
-      color: #f7f3da;
-    }
+    .hud strong { color: #f7f3da; }
+    .instructions { color: #b7cbd8; }
+    .inventory { color: #e8dca8; }
+    .status { color: #9fe3b1; }
   </style>
 </head>
 <body>
-  <div class="hud"><strong>Hex World</strong> · move with WASD / arrows · Q/E step diagonally</div>
+  <div class="hud">
+    <div><strong>Hex World</strong> · move with WASD / arrows · Q/E step diagonally</div>
+    <div class="instructions">Stand on a green grass tile and press G to gather it.</div>
+    <div class="inventory">Grass: <span id="grass-count">0</span> · Grass seeds: <span id="seed-count">0</span></div>
+    <div class="status" id="status">Find a grass tile to gather resources.</div>
+  </div>
   <canvas id="world"></canvas>
 
   <script>
     const canvas = document.getElementById("world");
     const ctx = canvas.getContext("2d");
+    const grassCount = document.getElementById("grass-count");
+    const seedCount = document.getElementById("seed-count");
+    const statusText = document.getElementById("status");
 
     const state = {
       cols: 22,
@@ -78,7 +83,9 @@
       lastX: 0,
       lastY: 0,
       selected: null,
-      player: { q: 0, r: 0 }
+      player: { q: 0, r: 0 },
+      inventory: { grass: 0, grassSeeds: 0 },
+      harvestedTiles: new Set()
     };
 
     const terrainPalette = {
@@ -88,7 +95,8 @@
       forest: "#2e6d4a",
       hill: "#8a7a4d",
       mountain: "#77859c",
-      snow: "#dfeaf5"
+      snow: "#dfeaf5",
+      harvested: "#776b48"
     };
 
     function hash2D(q, r) {
@@ -107,6 +115,35 @@
       return "snow";
     }
 
+    function tileKey(q, r) {
+      return `${q},${r}`;
+    }
+
+    function updateInventory() {
+      grassCount.textContent = state.inventory.grass;
+      seedCount.textContent = state.inventory.grassSeeds;
+    }
+
+    function gatherGrass() {
+      const { q, r } = state.player;
+      const key = tileKey(q, r);
+      if (terrainAt(q, r) !== "grass") {
+        statusText.textContent = "You must stand directly on a grass tile to gather.";
+        return;
+      }
+      if (state.harvestedTiles.has(key)) {
+        statusText.textContent = "This grass tile has already been gathered.";
+        return;
+      }
+
+      state.harvestedTiles.add(key);
+      state.inventory.grass += 1;
+      state.inventory.grassSeeds += 1;
+      statusText.textContent = "Gathered 1 grass and 1 grass seed.";
+      updateInventory();
+      draw();
+    }
+
     function hexSize(radius) {
       return {
         width: Math.sqrt(3) * radius,
@@ -117,9 +154,10 @@
 
     function axialToPixel(q, r, radius) {
       const size = hexSize(radius);
-      const x = size.width * (q + r / 2);
-      const y = size.vertical * r;
-      return { x, y };
+      return {
+        x: size.width * (q + r / 2),
+        y: size.vertical * r
+      };
     }
 
     function shadeColor(hex, intensity) {
@@ -141,7 +179,6 @@
         else ctx.lineTo(px, py);
       }
       ctx.closePath();
-
       ctx.fillStyle = fill;
       ctx.fill();
       ctx.lineWidth = 1.2;
@@ -184,35 +221,47 @@
       const centerX = width / 2 + state.offsetX;
       const centerY = height / 2 + state.offsetY;
       const actualRadius = state.radius * state.zoom;
-
       const tiles = [];
+
       for (let r = -state.rows; r <= state.rows; r++) {
         for (let q = -state.cols; q <= state.cols; q++) {
           const p = axialToPixel(q, r, actualRadius);
-          const x = centerX + p.x;
-          const y = centerY + p.y;
-          const t = terrainAt(q, r);
-          const base = terrainPalette[t];
+          const terrain = terrainAt(q, r);
+          const harvested = state.harvestedTiles.has(tileKey(q, r));
+          const base = harvested ? terrainPalette.harvested : terrainPalette[terrain];
           const shade = 0.8 + hash2D(q * 2.1, r * 2.1) * 0.5;
-          tiles.push({ q, r, x, y, fill: shadeColor(base, shade), terrain: t });
+          tiles.push({
+            q,
+            r,
+            x: centerX + p.x,
+            y: centerY + p.y,
+            fill: shadeColor(base, shade),
+            harvested
+          });
         }
       }
 
       tiles.sort((a, b) => (a.r + a.q) - (b.r + b.q));
       for (const tile of tiles) {
         drawHex(tile.x, tile.y, actualRadius, tile.fill, "rgba(255,255,255,0.10)");
+        if (tile.harvested) {
+          ctx.fillStyle = "rgba(245, 220, 150, 0.85)";
+          ctx.font = `${Math.max(9, actualRadius * 0.55)}px sans-serif`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("· ·", tile.x, tile.y);
+        }
       }
 
       const playerPos = axialToPixel(state.player.q, state.player.r, actualRadius);
       drawPlayer(centerX + playerPos.x, centerY + playerPos.y, actualRadius);
 
       if (state.selected) {
-        const tile = state.selected;
         ctx.beginPath();
         for (let i = 0; i < 6; i++) {
           const angle = (Math.PI / 180) * (60 * i - 30);
-          const px = tile.x + actualRadius * Math.cos(angle);
-          const py = tile.y + actualRadius * Math.sin(angle);
+          const px = state.selected.x + actualRadius * Math.cos(angle);
+          const py = state.selected.y + actualRadius * Math.sin(angle);
           if (i === 0) ctx.moveTo(px, py);
           else ctx.lineTo(px, py);
         }
@@ -231,37 +280,34 @@
       ctx.fillRect(0, 0, width, height);
 
       const gradient = ctx.createRadialGradient(
-        width * 0.5,
-        height * 0.45,
-        140,
-        width * 0.5,
-        height * 0.5,
-        Math.max(width, height) * 0.9
+        width * 0.5, height * 0.45, 140,
+        width * 0.5, height * 0.5, Math.max(width, height) * 0.9
       );
       gradient.addColorStop(0, "rgba(14,40,54,0.12)");
       gradient.addColorStop(1, "rgba(2,8,12,0.65)");
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, width, height);
-
       drawWorld();
     }
 
     function getTileAtMouse(x, y) {
       const cx = x - window.innerWidth / 2 - state.offsetX;
       const cy = y - window.innerHeight / 2 - state.offsetY;
-
       let best = null;
       let bestDist = Infinity;
 
       for (let r = -state.rows; r <= state.rows; r++) {
         for (let q = -state.cols; q <= state.cols; q++) {
           const p = axialToPixel(q, r, state.radius * state.zoom);
-          const hx = p.x;
-          const hy = p.y;
-          const dist = Math.hypot(cx - hx, cy - hy);
+          const dist = Math.hypot(cx - p.x, cy - p.y);
           if (dist < bestDist) {
             bestDist = dist;
-            best = { q, r, x: window.innerWidth / 2 + state.offsetX + hx, y: window.innerHeight / 2 + state.offsetY + hy };
+            best = {
+              q,
+              r,
+              x: window.innerWidth / 2 + state.offsetX + p.x,
+              y: window.innerHeight / 2 + state.offsetY + p.y
+            };
           }
         }
       }
@@ -270,20 +316,22 @@
     }
 
     const movementKeys = {
-      ArrowRight: [1, 0],
-      d: [1, 0],
-      ArrowLeft: [-1, 0],
-      a: [-1, 0],
-      ArrowUp: [1, -1],
-      w: [1, -1],
-      ArrowDown: [-1, 1],
-      s: [-1, 1],
+      ArrowRight: [1, 0], d: [1, 0],
+      ArrowLeft: [-1, 0], a: [-1, 0],
+      ArrowUp: [1, -1], w: [1, -1],
+      ArrowDown: [-1, 1], s: [-1, 1],
       q: [0, -1],
       e: [0, 1]
     };
 
     window.addEventListener("keydown", (event) => {
       const key = event.key.toLowerCase();
+      if (key === "g") {
+        event.preventDefault();
+        gatherGrass();
+        return;
+      }
+
       const move = movementKeys[event.key] || movementKeys[key];
       if (!move) return;
 
@@ -319,8 +367,7 @@
         return;
       }
 
-      const tile = getTileAtMouse(x, y);
-      state.selected = tile;
+      state.selected = getTileAtMouse(x, y);
       draw();
     });
 
@@ -332,9 +379,8 @@
     }, { passive: false });
 
     window.addEventListener("resize", resize);
-
+    updateInventory();
     resize();
-    draw();
   </script>
 </body>
 </html>
