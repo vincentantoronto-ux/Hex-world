@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hex World</title>
+  <style>
+    :root {
+      --bg1: #07131d;
+      --bg2: #0d1f2a;
+      --panel: rgba(7, 19, 29, 0.64);
+      --text: #dfeef8;
+      --muted: #9eb6c8;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: radial-gradient(circle at 20% 10%, #153b4f 0%, var(--bg1) 35%, #030b11 100%);
+      color: var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      cursor: grab;
+    }
+
+    canvas.dragging {
+      cursor: grabbing;
+    }
+
+    .hud {
+      position: fixed;
+      top: 14px;
+      left: 14px;
+      padding: 10px 12px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(9,20,29,0.5);
+      border-radius: 10px;
+      box-shadow: 0 8px 18px rgba(0,0,0,0.18);
+      backdrop-filter: blur(6px);
+      color: var(--text);
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      user-select: none;
+      pointer-events: none;
+    }
+
+    .hud strong {
+      color: #f7f3da;
+    }
+  </style>
+</head>
+<body>
+  <div class="hud"><strong>Hex World</strong> · move with WASD / arrows · Q/E step diagonally</div>
+  <canvas id="world"></canvas>
+
+  <script>
+    const canvas = document.getElementById("world");
+    const ctx = canvas.getContext("2d");
+
+    const state = {
+      cols: 22,
+      rows: 16,
+      radius: 22,
+      zoom: 1,
+      offsetX: 0,
+      offsetY: 0,
+      dragging: false,
+      lastX: 0,
+      lastY: 0,
+      selected: null,
+      player: { q: 0, r: 0 }
+    };
+
+    const terrainPalette = {
+      ocean: "#1d5f7a",
+      beach: "#d9c88d",
+      grass: "#3d8b5a",
+      forest: "#2e6d4a",
+      hill: "#8a7a4d",
+      mountain: "#77859c",
+      snow: "#dfeaf5"
+    };
+
+    function hash2D(q, r) {
+      const value = Math.sin(q * 127.1 + r * 311.7 + 74.7) * 43758.5453123;
+      return value - Math.floor(value);
+    }
+
+    function terrainAt(q, r) {
+      const n = hash2D(q, r);
+      if (n < 0.18) return "ocean";
+      if (n < 0.22) return "beach";
+      if (n < 0.52) return "grass";
+      if (n < 0.68) return "forest";
+      if (n < 0.82) return "hill";
+      if (n < 0.92) return "mountain";
+      return "snow";
+    }
+
+    function hexSize(radius) {
+      return {
+        width: Math.sqrt(3) * radius,
+        height: 2 * radius,
+        vertical: 1.5 * radius
+      };
+    }
+
+    function axialToPixel(q, r, radius) {
+      const size = hexSize(radius);
+      const x = size.width * (q + r / 2);
+      const y = size.vertical * r;
+      return { x, y };
+    }
+
+    function shadeColor(hex, intensity) {
+      const c = hex.replace("#", "");
+      const num = parseInt(c, 16);
+      const r = (num >> 16) * intensity;
+      const g = ((num >> 8) & 0x00ff) * intensity;
+      const b = (num & 0xff) * intensity;
+      return `rgb(${Math.min(255, Math.round(r))}, ${Math.min(255, Math.round(g))}, ${Math.min(255, Math.round(b))})`;
+    }
+
+    function drawHex(x, y, radius, fill, stroke = "rgba(255,255,255,0.14)") {
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const angle = (Math.PI / 180) * (60 * i - 30);
+        const px = x + radius * Math.cos(angle);
+        const py = y + radius * Math.sin(angle);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = stroke;
+      ctx.stroke();
+    }
+
+    function drawPlayer(x, y, radius) {
+      ctx.beginPath();
+      ctx.ellipse(x, y + radius * 0.48, radius * 0.38, radius * 0.16, 0, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(x, y - radius * 0.32, radius * 0.2, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffe0bd";
+      ctx.fill();
+      ctx.strokeStyle = "#fff1d6";
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(x, y + radius * 0.08, radius * 0.31, 0, Math.PI * 2);
+      ctx.fillStyle = "#f4a261";
+      ctx.fill();
+      ctx.strokeStyle = "#fff1d6";
+      ctx.stroke();
+    }
+
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = window.innerWidth * dpr;
+      canvas.height = window.innerHeight * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      draw();
+    }
+
+    function drawWorld() {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      const centerX = width / 2 + state.offsetX;
+      const centerY = height / 2 + state.offsetY;
+      const actualRadius = state.radius * state.zoom;
+
+      const tiles = [];
+      for (let r = -state.rows; r <= state.rows; r++) {
+        for (let q = -state.cols; q <= state.cols; q++) {
+          const p = axialToPixel(q, r, actualRadius);
+          const x = centerX + p.x;
+          const y = centerY + p.y;
+          const t = terrainAt(q, r);
+          const base = terrainPalette[t];
+          const shade = 0.8 + hash2D(q * 2.1, r * 2.1) * 0.5;
+          tiles.push({ q, r, x, y, fill: shadeColor(base, shade), terrain: t });
+        }
+      }
+
+      tiles.sort((a, b) => (a.r + a.q) - (b.r + b.q));
+      for (const tile of tiles) {
+        drawHex(tile.x, tile.y, actualRadius, tile.fill, "rgba(255,255,255,0.10)");
+      }
+
+      const playerPos = axialToPixel(state.player.q, state.player.r, actualRadius);
+      drawPlayer(centerX + playerPos.x, centerY + playerPos.y, actualRadius);
+
+      if (state.selected) {
+        const tile = state.selected;
+        ctx.beginPath();
+        for (let i = 0; i < 6; i++) {
+          const angle = (Math.PI / 180) * (60 * i - 30);
+          const px = tile.x + actualRadius * Math.cos(angle);
+          const py = tile.y + actualRadius * Math.sin(angle);
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.strokeStyle = "rgba(255,255,255,0.9)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+
+    function draw() {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = "#06141d";
+      ctx.fillRect(0, 0, width, height);
+
+      const gradient = ctx.createRadialGradient(
+        width * 0.5,
+        height * 0.45,
+        140,
+        width * 0.5,
+        height * 0.5,
+        Math.max(width, height) * 0.9
+      );
+      gradient.addColorStop(0, "rgba(14,40,54,0.12)");
+      gradient.addColorStop(1, "rgba(2,8,12,0.65)");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, width, height);
+
+      drawWorld();
+    }
+
+    function getTileAtMouse(x, y) {
+      const cx = x - window.innerWidth / 2 - state.offsetX;
+      const cy = y - window.innerHeight / 2 - state.offsetY;
+
+      let best = null;
+      let bestDist = Infinity;
+
+      for (let r = -state.rows; r <= state.rows; r++) {
+        for (let q = -state.cols; q <= state.cols; q++) {
+          const p = axialToPixel(q, r, state.radius * state.zoom);
+          const hx = p.x;
+          const hy = p.y;
+          const dist = Math.hypot(cx - hx, cy - hy);
+          if (dist < bestDist) {
+            bestDist = dist;
+            best = { q, r, x: window.innerWidth / 2 + state.offsetX + hx, y: window.innerHeight / 2 + state.offsetY + hy };
+          }
+        }
+      }
+
+      return bestDist < state.radius * state.zoom * 1.2 ? best : null;
+    }
+
+    const movementKeys = {
+      ArrowRight: [1, 0],
+      d: [1, 0],
+      ArrowLeft: [-1, 0],
+      a: [-1, 0],
+      ArrowUp: [1, -1],
+      w: [1, -1],
+      ArrowDown: [-1, 1],
+      s: [-1, 1],
+      q: [0, -1],
+      e: [0, 1]
+    };
+
+    window.addEventListener("keydown", (event) => {
+      const key = event.key.toLowerCase();
+      const move = movementKeys[event.key] || movementKeys[key];
+      if (!move) return;
+
+      event.preventDefault();
+      state.player.q = Math.max(-state.cols, Math.min(state.cols, state.player.q + move[0]));
+      state.player.r = Math.max(-state.rows, Math.min(state.rows, state.player.r + move[1]));
+      draw();
+    });
+
+    canvas.addEventListener("pointerdown", (event) => {
+      state.dragging = true;
+      canvas.classList.add("dragging");
+      state.lastX = event.clientX;
+      state.lastY = event.clientY;
+    });
+
+    window.addEventListener("pointerup", () => {
+      state.dragging = false;
+      canvas.classList.remove("dragging");
+    });
+
+    canvas.addEventListener("pointermove", (event) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+
+      if (state.dragging) {
+        state.offsetX += event.clientX - state.lastX;
+        state.offsetY += event.clientY - state.lastY;
+        state.lastX = event.clientX;
+        state.lastY = event.clientY;
+        draw();
+        return;
+      }
+
+      const tile = getTileAtMouse(x, y);
+      state.selected = tile;
+      draw();
+    });
+
+    canvas.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      const delta = event.deltaY > 0 ? -0.12 : 0.12;
+      state.zoom = Math.max(0.5, Math.min(2.4, state.zoom + delta));
+      draw();
+    }, { passive: false });
+
+    window.addEventListener("resize", resize);
+
+    resize();
+    draw();
+  </script>
+</body>
+</html>
